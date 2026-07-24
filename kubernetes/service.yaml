@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: azure-aks-website-service
+
+spec:
+  type: LoadBalancer
+
+  selector:
+    app: azure-aks-website
+
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
