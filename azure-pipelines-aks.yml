@@ -1,0 +1,180 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  azureServiceConnection: 'ValeurTech-ServiceConnection'
+  dockerServiceConnection: 'dockerhub-navigator81'
+
+  resourceGroup: 'rg-aks-website'
+  aksClusterName: 'aks-website'
+  location: 'westus2'
+
+  imageRepository: 'navigator81/azure-aks-website'
+  imageTag: '$(Build.BuildId)'
+
+  kubernetesNamespace: 'default'
+  deploymentName: 'azure-aks-website'
+  containerName: 'website'
+  serviceName: 'azure-aks-website-service'
+
+stages:
+  - stage: Validate
+    displayName: Validate Website and Kubernetes Files
+    jobs:
+      - job: ValidateFiles
+        displayName: Validate Deployment Files
+        steps:
+          - checkout: self
+
+          - script: |
+              set -e
+
+              test -f Dockerfile
+              test -f .dockerignore
+              test -f index.html
+              test -f kubernetes/deployment.yaml
+              test -f kubernetes/service.yaml
+
+              echo "All required files are present."
+            displayName: Check required files
+
+  - stage: Build
+    displayName: Build and Push Docker Image
+    dependsOn: Validate
+    condition: succeeded()
+
+    jobs:
+      - job: BuildImage
+        displayName: Build Website Container
+        steps:
+          - checkout: self
+
+          - task: Docker@2
+            displayName: Sign in to Docker Hub
+            inputs:
+              command: login
+              containerRegistry: '$(dockerServiceConnection)'
+
+          - script: |
+              set -e
+
+              docker buildx create --use --name aks-builder
+              docker buildx inspect --bootstrap
+
+              docker buildx build \
+                --platform linux/amd64 \
+                --file "$(Build.SourcesDirectory)/Dockerfile" \
+                --tag "$(imageRepository):$(imageTag)" \
+                --tag "$(imageRepository):latest" \
+                --push \
+                "$(Build.SourcesDirectory)"
+            displayName: Build and Push Image
+
+  - stage: Deploy
+    displayName: Deploy to Azure Kubernetes Service
+    dependsOn: Build
+    condition: succeeded()
+
+    jobs:
+      - job: DeployAKS
+        displayName: Update Personal Website
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: Connect and Deploy to AKS
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+
+                az aks get-credentials \
+                  --resource-group "$(resourceGroup)" \
+                  --name "$(aksClusterName)" \
+                  --overwrite-existing
+
+                kubectl apply \
+                  -f "$(Build.SourcesDirectory)/kubernetes/deployment.yaml" \
+                  --namespace "$(kubernetesNamespace)"
+
+                kubectl apply \
+                  -f "$(Build.SourcesDirectory)/kubernetes/service.yaml" \
+                  --namespace "$(kubernetesNamespace)"
+
+                kubectl set image \
+                  deployment/"$(deploymentName)" \
+                  "$(containerName)"="$(imageRepository):$(imageTag)" \
+                  --namespace "$(kubernetesNamespace)"
+
+                kubectl rollout status \
+                  deployment/"$(deploymentName)" \
+                  --namespace "$(kubernetesNamespace)" \
+                  --timeout=300s
+
+  - stage: Verify
+    displayName: Test Deployed Website
+    dependsOn: Deploy
+    condition: succeeded()
+
+    jobs:
+      - job: VerifyWebsite
+        displayName: Verify Website Response
+        steps:
+          - task: AzureCLI@2
+            displayName: Test AKS Website
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+
+                az aks get-credentials \
+                  --resource-group "$(resourceGroup)" \
+                  --name "$(aksClusterName)" \
+                  --overwrite-existing
+
+                kubectl get pods --namespace "$(kubernetesNamespace)"
+                kubectl get service "$(serviceName)" \
+                  --namespace "$(kubernetesNamespace)"
+
+                EXTERNAL_IP=""
+
+                for attempt in {1..30}; do
+                  EXTERNAL_IP=$(kubectl get service "$(serviceName)" \
+                    --namespace "$(kubernetesNamespace)" \
+                    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' \
+                    2>/dev/null || true)
+
+                  if [ -n "$EXTERNAL_IP" ]; then
+                    break
+                  fi
+
+                  echo "Waiting for external IP..."
+                  sleep 10
+                done
+
+                if [ -z "$EXTERNAL_IP" ]; then
+                  echo "No external IP was assigned."
+                  exit 1
+                fi
+
+                echo "Testing http://$EXTERNAL_IP"
+
+                curl \
+                  --fail \
+                  --retry 10 \
+                  --retry-delay 10 \
+                  --retry-connrefused \
+                  "http://$EXTERNAL_IP"
+
+                echo "Website URL: http://$EXTERNAL_IP"
