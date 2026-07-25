@@ -22,7 +22,7 @@ variables:
 
   # Azure configuration
   location: 'eastus'
-  nodeVmSize: 'Standard_D2ls_v5'
+  nodeVmSize: 'Standard_D2ls_v7'
   nodePoolName: 'agentpool'
 
   # A unique environment is created for every pipeline run
