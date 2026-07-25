@@ -127,7 +127,6 @@ stages:
                   --node-count "${{ parameters.nodeCount }}" \
                   --node-vm-size "$(nodeVmSize)" \
                   --enable-managed-identity \
-                  --enable-rbac \
                   --generate-ssh-keys \
                   --tags \
                     environment=Development \
