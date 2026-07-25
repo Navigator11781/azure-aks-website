@@ -1,0 +1,394 @@
+trigger: none
+pr: none
+
+parameters:
+  - name: cleanupAfterRun
+    displayName: Delete AKS resources after testing
+    type: boolean
+    default: false
+
+  - name: nodeCount
+    displayName: AKS node count
+    type: number
+    default: 1
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  # Existing Azure DevOps service connections
+  azureServiceConnection: 'ValeurTech-ServiceConnection'
+  dockerServiceConnection: 'dockerhub-navigator81'
+
+  # Azure configuration
+  location: 'westus2'
+  nodeVmSize: 'Standard_D2ls_v5'
+  nodePoolName: 'agentpool'
+
+  # A unique environment is created for every pipeline run
+  resourceGroup: 'rg-aks-auto-$(Build.BuildId)'
+  aksClusterName: 'aks-auto-$(Build.BuildId)'
+  dnsLabel: 'umer-aks-$(Build.BuildId)'
+
+  # Docker image
+  imageRepository: 'navigator81/azure-aks-website'
+  imageTag: '$(Build.BuildId)'
+
+  # Kubernetes configuration
+  kubernetesNamespace: 'default'
+  deploymentName: 'azure-aks-website'
+  containerName: 'website'
+  serviceName: 'azure-aks-website-service'
+
+stages:
+
+  # =========================================================
+  # STAGE 1: VALIDATE
+  # =========================================================
+  - stage: Validate
+    displayName: Validate Website Files
+
+    jobs:
+      - job: ValidateFiles
+        displayName: Validate Deployment Files
+
+        steps:
+          - checkout: self
+
+          - script: |
+              set -euo pipefail
+
+              echo "Checking required files..."
+
+              test -f Dockerfile
+              test -f .dockerignore
+              test -f index.html
+              test -f kubernetes/deployment.yaml
+              test -f kubernetes/service.yaml
+
+              echo "All required files are present."
+            displayName: Check Required Files
+
+          - script: |
+              set -euo pipefail
+
+              echo "Deployment manifest:"
+              cat kubernetes/deployment.yaml
+
+              echo ""
+              echo "Service manifest:"
+              cat kubernetes/service.yaml
+            displayName: Display Kubernetes Manifests
+
+  # =========================================================
+  # STAGE 2: CREATE AKS
+  # =========================================================
+  - stage: Provision
+    displayName: Create New AKS Cluster
+    dependsOn: Validate
+    condition: succeeded()
+
+    jobs:
+      - job: CreateAKS
+        displayName: Provision Runtime AKS Environment
+        timeoutInMinutes: 45
+
+        steps:
+          - task: AzureCLI@2
+            displayName: Create Resource Group and AKS
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                echo "Creating resource group:"
+                echo "$(resourceGroup)"
+
+                az group create \
+                  --name "$(resourceGroup)" \
+                  --location "$(location)" \
+                  --tags \
+                    environment=Development \
+                    project=AKS-Website \
+                    managed_by=Azure-DevOps \
+                    pipeline_build="$(Build.BuildId)"
+
+                echo "Creating AKS cluster:"
+                echo "$(aksClusterName)"
+
+                az aks create \
+                  --resource-group "$(resourceGroup)" \
+                  --name "$(aksClusterName)" \
+                  --location "$(location)" \
+                  --tier free \
+                  --nodepool-name "$(nodePoolName)" \
+                  --node-count "${{ parameters.nodeCount }}" \
+                  --node-vm-size "$(nodeVmSize)" \
+                  --enable-managed-identity \
+                  --enable-rbac \
+                  --generate-ssh-keys \
+                  --tags \
+                    environment=Development \
+                    project=AKS-Website \
+                    managed_by=Azure-DevOps
+
+                echo "Waiting for AKS provisioning..."
+
+                az aks wait \
+                  --resource-group "$(resourceGroup)" \
+                  --name "$(aksClusterName)" \
+                  --created \
+                  --interval 30 \
+                  --timeout 2400
+
+                echo "AKS cluster created successfully."
+
+                az aks show \
+                  --resource-group "$(resourceGroup)" \
+                  --name "$(aksClusterName)" \
+                  --query "{
+                    Cluster:name,
+                    ResourceGroup:resourceGroup,
+                    State:provisioningState,
+                    KubernetesVersion:kubernetesVersion,
+                    NodeResourceGroup:nodeResourceGroup
+                  }" \
+                  --output table
+
+  # =========================================================
+  # STAGE 3: BUILD AND PUSH DOCKER IMAGE
+  # =========================================================
+  - stage: Build
+    displayName: Build and Push Docker Image
+    dependsOn: Provision
+    condition: succeeded()
+
+    jobs:
+      - job: BuildImage
+        displayName: Build Website Container
+
+        steps:
+          - checkout: self
+
+          - task: Docker@2
+            displayName: Sign in to Docker Hub
+            inputs:
+              command: login
+              containerRegistry: '$(dockerServiceConnection)'
+
+          - script: |
+              set -euo pipefail
+
+              BUILDER_NAME="aks-builder-$(Build.BuildId)"
+
+              docker buildx create \
+                --use \
+                --name "$BUILDER_NAME"
+
+              docker buildx inspect \
+                --bootstrap
+
+              docker buildx build \
+                --platform linux/amd64 \
+                --file "$(Build.SourcesDirectory)/Dockerfile" \
+                --tag "$(imageRepository):$(imageTag)" \
+                --tag "$(imageRepository):latest" \
+                --push \
+                "$(Build.SourcesDirectory)"
+
+              echo "Docker image pushed:"
+              echo "$(imageRepository):$(imageTag)"
+            displayName: Build and Push linux/amd64 Image
+
+  # =========================================================
+  # STAGE 4: DEPLOY TO NEW AKS CLUSTER
+  # =========================================================
+  - stage: Deploy
+    displayName: Deploy Website to New AKS Cluster
+    dependsOn: Build
+    condition: succeeded()
+
+    jobs:
+      - job: DeployWebsite
+        displayName: Deploy Kubernetes Application
+
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: Connect to AKS and Deploy
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                az aks get-credentials \
+                  --resource-group "$(resourceGroup)" \
+                  --name "$(aksClusterName)" \
+                  --overwrite-existing
+
+                echo "Cluster nodes:"
+                kubectl get nodes -o wide
+
+                kubectl apply \
+                  --namespace "$(kubernetesNamespace)" \
+                  -f "$(Build.SourcesDirectory)/kubernetes/deployment.yaml"
+
+                kubectl apply \
+                  --namespace "$(kubernetesNamespace)" \
+                  -f "$(Build.SourcesDirectory)/kubernetes/service.yaml"
+
+                echo "Assigning Azure DNS label to LoadBalancer service..."
+
+                kubectl annotate service "$(serviceName)" \
+                  --namespace "$(kubernetesNamespace)" \
+                  service.beta.kubernetes.io/azure-dns-label-name="$(dnsLabel)" \
+                  --overwrite
+
+                echo "Updating deployment to Build ID image..."
+
+                kubectl set image \
+                  deployment/"$(deploymentName)" \
+                  "$(containerName)"="$(imageRepository):$(imageTag)" \
+                  --namespace "$(kubernetesNamespace)"
+
+                echo "Waiting for deployment rollout..."
+
+                kubectl rollout status \
+                  deployment/"$(deploymentName)" \
+                  --namespace "$(kubernetesNamespace)" \
+                  --timeout=600s
+
+                echo "Deployment completed."
+                kubectl get deployments \
+                  --namespace "$(kubernetesNamespace)"
+
+                kubectl get pods \
+                  --namespace "$(kubernetesNamespace)" \
+                  -o wide
+
+  # =========================================================
+  # STAGE 5: VERIFY WEBSITE
+  # =========================================================
+  - stage: Verify
+    displayName: Test Deployed Website
+    dependsOn: Deploy
+    condition: succeeded()
+
+    jobs:
+      - job: VerifyWebsite
+        displayName: Verify AKS Website Response
+        timeoutInMinutes: 15
+
+        steps:
+          - task: AzureCLI@2
+            displayName: Test Public Website
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                az aks get-credentials \
+                  --resource-group "$(resourceGroup)" \
+                  --name "$(aksClusterName)" \
+                  --overwrite-existing
+
+                EXTERNAL_IP=""
+
+                echo "Waiting for Azure Load Balancer public IP..."
+
+                for attempt in {1..60}; do
+                  EXTERNAL_IP=$(kubectl get service "$(serviceName)" \
+                    --namespace "$(kubernetesNamespace)" \
+                    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' \
+                    2>/dev/null || true)
+
+                  if [ -n "$EXTERNAL_IP" ]; then
+                    echo "External IP assigned: $EXTERNAL_IP"
+                    break
+                  fi
+
+                  echo "Attempt $attempt/60: IP is still pending..."
+                  sleep 10
+                done
+
+                if [ -z "$EXTERNAL_IP" ]; then
+                  echo "No external IP was assigned within 10 minutes."
+                  kubectl describe service "$(serviceName)" \
+                    --namespace "$(kubernetesNamespace)"
+                  exit 1
+                fi
+
+                WEBSITE_FQDN="$(dnsLabel).$(location).cloudapp.azure.com"
+
+                echo "Testing public IP:"
+                echo "http://$EXTERNAL_IP"
+
+                curl \
+                  --fail \
+                  --retry 20 \
+                  --retry-delay 10 \
+                  --retry-connrefused \
+                  "http://$EXTERNAL_IP"
+
+                echo ""
+                echo "Testing DNS URL:"
+                echo "http://$WEBSITE_FQDN"
+
+                curl \
+                  --fail \
+                  --retry 20 \
+                  --retry-delay 10 \
+                  --retry-connrefused \
+                  "http://$WEBSITE_FQDN"
+
+                echo ""
+                echo "========================================"
+                echo "AKS DEPLOYMENT SUCCESSFUL"
+                echo "========================================"
+                echo "Resource group: $(resourceGroup)"
+                echo "AKS cluster:    $(aksClusterName)"
+                echo "Docker image:   $(imageRepository):$(imageTag)"
+                echo "Public IP:      http://$EXTERNAL_IP"
+                echo "Website URL:    http://$WEBSITE_FQDN"
+                echo "========================================"
+
+  # =========================================================
+  # OPTIONAL STAGE 6: DELETE EVERYTHING
+  # This stage only exists when cleanupAfterRun is selected.
+  # =========================================================
+  - ${{ if eq(parameters.cleanupAfterRun, true) }}:
+    - stage: Cleanup
+      displayName: Delete Runtime AKS Environment
+      dependsOn: Verify
+      condition: always()
+
+      jobs:
+        - job: DeleteResources
+          displayName: Delete Resource Group
+
+          steps:
+            - task: AzureCLI@2
+              displayName: Delete AKS Runtime Resources
+              inputs:
+                azureSubscription: '$(azureServiceConnection)'
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  set -euo pipefail
+
+                  echo "Deleting resource group:"
+                  echo "$(resourceGroup)"
+
+                  az group delete \
+                    --name "$(resourceGroup)" \
+                    --yes \
+                    --no-wait
+
+                  echo "Resource group deletion started."
