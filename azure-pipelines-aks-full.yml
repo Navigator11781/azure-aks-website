@@ -21,7 +21,7 @@ variables:
   dockerServiceConnection: 'dockerhub-navigator81'
 
   # Azure configuration
-  location: 'westus2'
+  location: 'eastus'
   nodeVmSize: 'Standard_D2ls_v5'
   nodePoolName: 'agentpool'
 
