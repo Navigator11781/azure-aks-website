@@ -16,7 +16,7 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  # Existing Azure DevOps service connections
+  # Azure DevOps service connections
   azureServiceConnection: 'ValeurTech-ServiceConnection'
   dockerServiceConnection: 'dockerhub-navigator81'
 
@@ -25,7 +25,7 @@ variables:
   nodeVmSize: 'Standard_D2ls_v7'
   nodePoolName: 'agentpool'
 
-  # A unique environment is created for every pipeline run
+  # Unique environment created for each run
   resourceGroup: 'rg-aks-auto-$(Build.BuildId)'
   aksClusterName: 'aks-auto-$(Build.BuildId)'
   dnsLabel: 'umer-aks-$(Build.BuildId)'
@@ -81,7 +81,7 @@ stages:
             displayName: Display Kubernetes Manifests
 
   # =========================================================
-  # STAGE 2: CREATE AKS
+  # STAGE 2: CREATE RESOURCE GROUP AND AKS
   # =========================================================
   - stage: Provision
     displayName: Create New AKS Cluster
@@ -202,7 +202,7 @@ stages:
             displayName: Build and Push linux/amd64 Image
 
   # =========================================================
-  # STAGE 4: DEPLOY TO NEW AKS CLUSTER
+  # STAGE 4: DEPLOY TO AKS
   # =========================================================
   - stage: Deploy
     displayName: Deploy Website to New AKS Cluster
@@ -241,14 +241,14 @@ stages:
                   --namespace "$(kubernetesNamespace)" \
                   -f "$(Build.SourcesDirectory)/kubernetes/service.yaml"
 
-                echo "Assigning Azure DNS label to LoadBalancer service..."
+                echo "Assigning Azure DNS label..."
 
                 kubectl annotate service "$(serviceName)" \
                   --namespace "$(kubernetesNamespace)" \
                   service.beta.kubernetes.io/azure-dns-label-name="$(dnsLabel)" \
                   --overwrite
 
-                echo "Updating deployment to Build ID image..."
+                echo "Updating deployment image..."
 
                 kubectl set image \
                   deployment/"$(deploymentName)" \
@@ -263,12 +263,16 @@ stages:
                   --timeout=600s
 
                 echo "Deployment completed."
+
                 kubectl get deployments \
                   --namespace "$(kubernetesNamespace)"
 
                 kubectl get pods \
                   --namespace "$(kubernetesNamespace)" \
                   -o wide
+
+                kubectl get services \
+                  --namespace "$(kubernetesNamespace)"
 
   # =========================================================
   # STAGE 5: VERIFY WEBSITE
@@ -319,8 +323,10 @@ stages:
 
                 if [ -z "$EXTERNAL_IP" ]; then
                   echo "No external IP was assigned within 10 minutes."
+
                   kubectl describe service "$(serviceName)" \
                     --namespace "$(kubernetesNamespace)"
+
                   exit 1
                 fi
 
@@ -358,10 +364,9 @@ stages:
                 echo "Website URL:    http://$WEBSITE_FQDN"
                 echo "========================================"
 
-    # =========================================================
-  # STAGE 6: CLEANUP RUNTIME ENVIRONMENT
-  # Runs even if Provision, Build, Deploy or Verify fails.
-  # Cleanup occurs when cleanupAfterRun is selected.
+  # =========================================================
+  # STAGE 6: CLEANUP
+  # Runs after success or failure.
   # =========================================================
   - stage: Cleanup
     displayName: Delete Runtime AKS Environment
@@ -402,7 +407,6 @@ stages:
 
                 if [ "$RESOURCE_GROUP_EXISTS" = "true" ]; then
 
-                  echo "Resource group exists."
                   echo "Starting deletion of:"
                   echo "$RESOURCE_GROUP"
 
@@ -411,12 +415,11 @@ stages:
                     --yes \
                     --no-wait
 
-                  echo "Deletion request successfully submitted."
-                  echo "Azure will also remove the associated AKS managed resource group."
+                  echo "Resource group deletion request submitted."
 
                 else
 
-                  echo "Resource group does not exist."
+                  echo "Resource group was not created."
                   echo "Nothing needs to be deleted."
 
                 fi
