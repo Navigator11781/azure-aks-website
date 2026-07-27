@@ -5,7 +5,7 @@ parameters:
   - name: cleanupAfterRun
     displayName: Delete AKS resources after testing
     type: boolean
-    default: false
+    default: true
 
   - name: nodeCount
     displayName: AKS node count
@@ -358,36 +358,65 @@ stages:
                 echo "Website URL:    http://$WEBSITE_FQDN"
                 echo "========================================"
 
+    # =========================================================
+  # STAGE 6: CLEANUP RUNTIME ENVIRONMENT
+  # Runs even if Provision, Build, Deploy or Verify fails.
+  # Cleanup occurs when cleanupAfterRun is selected.
   # =========================================================
-  # OPTIONAL STAGE 6: DELETE EVERYTHING
-  # This stage only exists when cleanupAfterRun is selected.
-  # =========================================================
-  - ${{ if eq(parameters.cleanupAfterRun, true) }}:
-    - stage: Cleanup
-      displayName: Delete Runtime AKS Environment
-      dependsOn: Verify
-      condition: always()
+  - stage: Cleanup
+    displayName: Delete Runtime AKS Environment
 
-      jobs:
-        - job: DeleteResources
-          displayName: Delete Resource Group
+    dependsOn:
+      - Provision
+      - Build
+      - Deploy
+      - Verify
 
-          steps:
-            - task: AzureCLI@2
-              displayName: Delete AKS Runtime Resources
-              inputs:
-                azureSubscription: '$(azureServiceConnection)'
-                scriptType: bash
-                scriptLocation: inlineScript
-                inlineScript: |
-                  set -euo pipefail
+    condition: |
+      and(
+        always(),
+        eq('${{ parameters.cleanupAfterRun }}', 'true')
+      )
 
-                  echo "Deleting resource group:"
-                  echo "$(resourceGroup)"
+    jobs:
+      - job: DeleteResources
+        displayName: Delete Runtime Resource Group
+
+        steps:
+          - task: AzureCLI@2
+            displayName: Delete AKS Runtime Resources
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                RESOURCE_GROUP="$(resourceGroup)"
+
+                echo "Checking runtime resource group:"
+                echo "$RESOURCE_GROUP"
+
+                RESOURCE_GROUP_EXISTS=$(az group exists \
+                  --name "$RESOURCE_GROUP")
+
+                if [ "$RESOURCE_GROUP_EXISTS" = "true" ]; then
+
+                  echo "Resource group exists."
+                  echo "Starting deletion of:"
+                  echo "$RESOURCE_GROUP"
 
                   az group delete \
-                    --name "$(resourceGroup)" \
+                    --name "$RESOURCE_GROUP" \
                     --yes \
                     --no-wait
 
-                  echo "Resource group deletion started."
+                  echo "Deletion request successfully submitted."
+                  echo "Azure will also remove the associated AKS managed resource group."
+
+                else
+
+                  echo "Resource group does not exist."
+                  echo "Nothing needs to be deleted."
+
+                fi
