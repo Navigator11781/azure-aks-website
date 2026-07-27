@@ -54,6 +54,17 @@ stages:
 
         steps:
           - checkout: self
+          - script: |
+              echo "========================================="
+              echo "Build ID       : $(Build.BuildId)"
+              echo "Build Number   : $(Build.BuildNumber)"
+              echo "Resource Group : $(resourceGroup)"
+              echo "AKS Cluster    : $(aksClusterName)"
+              echo "Location       : $(location)"
+              echo "Branch         : $(Build.SourceBranch)"
+              echo "Commit         : $(Build.SourceVersion)"
+              echo "========================================="
+            displayName: "Show Pipeline Information"
 
           - script: |
               set -euo pipefail
