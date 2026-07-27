@@ -1,6 +1,13 @@
 trigger: none
 pr: none
 
+- script: |
+    echo "Build ID       : $(Build.BuildId)"
+    echo "Build Number   : $(Build.BuildNumber)"
+    echo "Source Branch  : $(Build.SourceBranch)"
+    echo "Commit         : $(Build.SourceVersion)"
+  displayName: "Show Pipeline Information"
+
 parameters:
   - name: cleanupAfterRun
     displayName: Delete AKS resources after testing
